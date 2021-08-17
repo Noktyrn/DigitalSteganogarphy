@@ -113,7 +113,15 @@ def quantize_dct_blocks(blocks):
     res = [[] for _ in range(len(blocks))]
     for i in range(len(res)):
         for b in blocks[i]:
-            res[i].append(np.round(b / qm))
+            res[i].append(b/qm)
+    
+    return np.asarray(res)
+
+def dequantize_dct_blocks(blocks):
+    res = [[] for _ in range(len(blocks))]
+    for i in range(len(res)):
+        for b in blocks[i]:
+            res[i].append(b*qm)
     
     return np.asarray(res)
 

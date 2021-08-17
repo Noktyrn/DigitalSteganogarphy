@@ -1,5 +1,5 @@
 import numpy as np
-from Utils.utils import cut_image_into_blocks, get_dct_coefs, quantize_dct_blocks, qm
+from Utils.utils import cut_image_into_blocks, get_dct_coefs, quantize_dct_blocks, qm, concatenate_image, get_image_from_dct_coefs, dequantize_dct_blocks
 
 def cost(u, v):
     """
@@ -34,136 +34,120 @@ def dist_func(u, v, blocks_vector):
     res += p/q
     return res * cost(u, v)
 
-def insert_message_AddEmb(image, message):
-    L = len(message)
+def create_emb_map(positions, n=8):
+    res = [[0 for _ in range(n)] for _ in range(n)]
+    for p in positions:
+        res[p[0]][p[1]] = 1
+    return res
+
+
+def embed_message_into_block(point, mes, positions, b):
+    for p in positions:
+        I = np.round(b[p[0]][p[1]])
+        if point >= len(mes):
+            break
+        if I < 0:
+            b[p[0]][p[1]] -= 1
+        elif I == 0:
+            b[p[0]][p[1]] -= mes[point]
+            point += 1
+        elif I == 1:
+            b[p[0]][p[1]] += mes[point]
+            point += 1
+        else:
+            b[p[0]][p[1]] += 1
+            
+    return point, b
+
+
+def get_message_from_block(mes, positions, b, emb_l):
+    for p in positions:
+        if emb_l <= 0:
+            break
+        I = np.round(b[p[0]][p[1]])
+        if I == 0 or I == 1:
+            emb_l -= 1
+            mes.append(0)
+        elif I == -1 or I == 2:
+            emb_l -= 1
+            mes.append(1)
+        
+        if I >= 2:
+            b[p[0]][p[1]] -= 1
+        elif I <= -1:
+            b[p[0]][p[1]] += 1
     
+    return mes, b, emb_l
+
+
+def get_capacity(positions, block_vector):
+    cap = 0
+    
+    for b in block_vector:
+        for p in positions:
+            if np.round(b[p[0]][p[1]]) == 0 or np.round(b[p[0]][p[1]]) == 1:
+                cap += 1
+    
+    return cap
+    
+
+def insert_message_AddEmb(image, message, k=1):
+    l = len(message)
+
     #step1
     blocks = cut_image_into_blocks(image)
     dct_blocks = quantize_dct_blocks(get_dct_coefs(blocks))
     
     #step2
-    b_vector = dct_blocks.flatten(1)
-    print(b_vector.shape)
+    b_vector = dct_blocks.reshape(4096, 8, 8)
+    
+    n = len(b_vector[0])
+    num_blocks = len(dct_blocks)
 
     #step3
-    Q = [[] for _ in len(b_vector[0])]
-    for i in range(len(b_vector)):
-        u = i // 8
-        v = i %  8
+    Q = [[] for _ in range(n)]
+    for i in range(num_blocks):
+        u = i // n
+        v = i %  n
         Q[u].append(dist_func(u, v, b_vector))
     
-    
-    return Q
-
     #step4
-    flag = True
-    while flag:
-        flag = False
-        for p in range(0, K-1):
-            for q in range(p+1, K):
-                if not(V[S[p]] > V[S[q]] or (V[S[p]] == V[S[q]] and W[S[p]] >= W[S[q]])):
-                    S[p], S[q] = S[q], S[p]
-                    flag = True
-
-    #step5
-    U = [[0 for i in range(L)] for _ in range(2)]
-    n = 0
-    f = 63
-    y = 0
+    k_coords = []
+    for i in range(n):
+        for j in range(n):
+            k_coords.append([i, j])
     
-    #step6
-    while y < L and f >= 0:
-        row_c = f // 8
-        col_c = f % 8
-        
-        row_b = S[n] // 64
-        col_b = S[n] % 64
-        
-        c = dct_blocks[row_b][col_b][row_c][col_c]
-        
-        if floor(c) != 0:
-            U[0][y] = S[n]
-            U[1][y] = f
-            y += 1
-        
-        n += 1
-        if n >= K:
-            n = 1
-            f -= 1
+    k_mins = sorted(k_coords, key=lambda x: Q[x[0]][x[1]])
+
+    embedding_positions = k_mins[:k]
+    cap = get_capacity(embedding_positions, b_vector)
+
+    if cap >= l:
+        point = 0
+        for idx in range(len(b_vector)):
+            point, temp_b = embed_message_into_block(point, message, embedding_positions, b_vector[idx])
+            b_vector[idx] = temp_b
+            if point >= l:
+                break
+
+        new_image = concatenate_image(get_image_from_dct_coefs(dequantize_dct_blocks(b_vector.reshape(64, 64, 8, 8))))
+        return new_image, {'route': embedding_positions, 'mes_len':l}
+    else:
+        raise RuntimeError("Capacity {} can't fit the message with size {}".format(cap, l))
+
+def extract_message_AddEmb(im, route, mes_len):
+    #step1
+    blocks = cut_image_into_blocks(im)
+    dct_blocks = quantize_dct_blocks(get_dct_coefs(blocks))
     
-    if f < 0:
-        raise RuntimeError("Can embed only {} bits, ran out of non-zero DCT coefficients".format(y))
-
-    #step7
-    y = 0
-
-    #step8
-    while y < L:
-        row_b = U[0][y] // 64
-        col_b = U[0][y] % 64
-
-        row_c = U[1][y] // 8
-        col_c = U[1][y] % 8
-
-        c_orig = dct_blocks[row_b][col_b][row_c][col_c]
-        c = floor(c_orig)
-        #step8.1
-        if message[y] == 0:
-            #step8.3
-            if (c < 0 and c % 2 == 1) or (c > 0 and c % 2 == 0):
-                y += 1
-                continue
-        else:
-            #step8.2
-            if (c < 0 and c % 2 == 0) or (c > 0 and c % 2 == 1):
-                y += 1
-                continue
-
-        #step8.4
-        r = 0
-
-        if abs(c) > 1:
-            r = randint(0, 2)
-        #step8.5
-        elif c == 1:
-            r = 0
-        else:
-            r = 1
-
-        #step8.6
-        if r == 1:
-            dct_blocks[row_b][col_b][row_c][col_c] = c_orig - 1
-        else:
-            dct_blocks[row_b][col_b][row_c][col_c] = c_orig + 1
-
-        y += 1
-
-    new_image = get_image_from_dct_coefs(dct_blocks)
-    return concatenate_image(new_image), {'route': U}
-
-def extract_message_AddEmb(im, route):
-    dct_blocks = get_dct_coefs(cut_image_into_blocks(im))
-    mes = []
+    #step2
+    b_vector = dct_blocks.reshape(4096, 8, 8)
     
-    for i in range(len(route[0])):
-        b = route[0][i]
-        
-        row_b = b // 64
-        col_b = b % 64
-        
-        c = route[1][i]
-        
-        row_c = c // 8
-        col_c = c % 8
-        
-        c = floor(dct_blocks[row_b][col_b][row_c][col_c])
-        
-        if (c < 0 and c % 2 == 1) or (c > 0 and c % 2 == 0):
-            mes.append(0)
-        else:
-            mes.append(1)
+    extracted_message = []
+
+    for idx in range(len(b_vector)):
+        extracted_message, temp_b_2, mes_len = get_message_from_block(extracted_message, route, b_vector[idx], mes_len)
+        if mes_len <= 0:
+            break
     
-    return mes
-
-
-print("Cost values for 0,0 is {}, for 7,7 is {}".format(cost(0,0), cost(7,7)))
+    return extracted_message
